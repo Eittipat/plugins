@@ -68,6 +68,10 @@
 @property(assign, nonatomic) BOOL isAudioSetup;
 @property(assign, nonatomic) BOOL isStreamingImages;
 @property(assign, nonatomic) UIDeviceOrientation lockedCaptureOrientation;
+@property(assign, nonatomic) double firstSampleTime;
+@property(assign, nonatomic) CMTime zeroSampleTime;
+@property(assign, nonatomic) CMTime firstVideoSampleTime;
+@property(assign, nonatomic) CMTime firstAudioSampleTime;
 @property(assign, nonatomic) CMTime lastVideoSampleTime;
 @property(assign, nonatomic) CMTime lastAudioSampleTime;
 @property(assign, nonatomic) CMTime videoTimeOffset;
@@ -429,7 +433,7 @@ NSString *const errorMethod = @"error";
 
     CFRetain(sampleBuffer);
     CMTime currentSampleTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
-
+    
     if (_videoWriter.status != AVAssetWriterStatusWriting) {
       [_videoWriter startWriting];
       [_videoWriter startSessionAtSourceTime:currentSampleTime];
@@ -448,7 +452,10 @@ NSString *const errorMethod = @"error";
 
         return;
       }
-
+      
+      if(CMTIME_COMPARE_INLINE(_firstVideoSampleTime,==, _zeroSampleTime)) {
+        _firstVideoSampleTime = currentSampleTime;
+      }
       _lastVideoSampleTime = currentSampleTime;
 
       CVPixelBufferRef nextBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
@@ -474,7 +481,11 @@ NSString *const errorMethod = @"error";
         return;
       }
 
+      if(CMTIME_COMPARE_INLINE(_firstAudioSampleTime,==, _zeroSampleTime)) {
+        _firstAudioSampleTime = currentSampleTime;
+      }
       _lastAudioSampleTime = currentSampleTime;
+      
 
       if (_audioTimeOffset.value != 0) {
         CFRelease(sampleBuffer);
@@ -483,7 +494,11 @@ NSString *const errorMethod = @"error";
 
       [self newAudioSample:sampleBuffer];
     }
-
+    
+    if(_firstSampleTime==-1) {
+      _firstSampleTime = CACurrentMediaTime();
+    }
+    
     CFRelease(sampleBuffer);
   }
 }
@@ -580,6 +595,10 @@ NSString *const errorMethod = @"error";
     }
     _isRecording = YES;
     _isRecordingPaused = NO;
+    _firstSampleTime = -1;
+    _zeroSampleTime = CMTimeMake(0, 1);
+    _firstVideoSampleTime = CMTimeMake(0, 1);
+    _firstAudioSampleTime = CMTimeMake(0, 1);
     _videoTimeOffset = CMTimeMake(0, 1);
     _audioTimeOffset = CMTimeMake(0, 1);
     _videoIsDisconnected = NO;
@@ -590,6 +609,46 @@ NSString *const errorMethod = @"error";
   }
 }
 
+-(void)extractM4AWithSrc:(NSString*)srcPath withDst:(NSString*)dstPath withOnDone:(void (^)(bool))onDone {
+  NSURL *srcURL = [NSURL fileURLWithPath:srcPath];
+  NSURL *dstURL = [NSURL fileURLWithPath:dstPath];
+
+  AVMutableComposition* newAudioAsset = [AVMutableComposition composition];
+  AVMutableCompositionTrack*  dstCompositionTrack = [newAudioAsset
+                                                      addMutableTrackWithMediaType:AVMediaTypeAudio
+                                                      preferredTrackID:kCMPersistentTrackID_Invalid];
+  AVAsset* srcAsset = [AVURLAsset URLAssetWithURL:srcURL options:nil];
+  AVAssetTrack* srcTrack = [[srcAsset tracksWithMediaType:AVMediaTypeAudio] objectAtIndex:0];
+
+  NSError* error;
+  if(NO == [dstCompositionTrack insertTimeRange:srcTrack.timeRange ofTrack:srcTrack atTime:kCMTimeZero error:&error]) {
+    NSLog(@"track insert failed: %@\n", error);
+    onDone(NO);
+    return;
+  }
+
+  AVAssetExportSession* exporter = [[AVAssetExportSession alloc] initWithAsset:newAudioAsset presetName:AVAssetExportPresetAppleM4A];
+  exporter.outputFileType = AVFileTypeAppleM4A;
+  exporter.outputURL = dstURL;
+  [exporter exportAsynchronouslyWithCompletionHandler:^{
+    AVAssetExportSessionStatus status = exporter.status;
+    switch(status) {
+      case AVAssetExportSessionStatusCompleted:
+        NSLog(@"SUCCESS!\n");
+        onDone(YES);
+        break;
+      case AVAssetExportSessionStatusFailed:
+        NSLog(@"FAILURE: %@\n", exporter.error);
+        onDone(NO);
+        break;
+      default:
+        NSLog(@"UNKNOWN: %ld\n", (long)status);
+        onDone(NO);
+        break;
+    }
+  }];
+}
+
 - (void)stopVideoRecordingWithResult:(FLTThreadSafeFlutterResult *)result {
   if (_isRecording) {
     _isRecording = NO;
@@ -598,8 +657,32 @@ NSString *const errorMethod = @"error";
       [_videoWriter finishWritingWithCompletionHandler:^{
         if (self->_videoWriter.status == AVAssetWriterStatusCompleted) {
           [self updateOrientation];
-          [result sendSuccessWithData:self->_videoRecordingPath];
-          self->_videoRecordingPath = nil;
+          NSString *pathname =[self->_videoRecordingPath stringByDeletingLastPathComponent];
+          NSString *filename = [[self->_videoRecordingPath lastPathComponent]stringByDeletingPathExtension];
+          NSString *m4aFile = [NSString stringWithFormat:@"%@/%@.m4a",pathname,filename];
+          NSLog(@"Writing m4a file to %@\n",m4aFile);
+          [self extractM4AWithSrc:self->_videoRecordingPath withDst:m4aFile withOnDone:^(bool success){
+            if (success==YES) {
+              [result sendSuccessWithData:self->_videoRecordingPath];
+              self->_videoRecordingPath = nil;
+            } else {
+              // always remove file if failed
+              if ([[NSFileManager defaultManager] fileExistsAtPath:m4aFile]) {
+                if(![[NSFileManager defaultManager] removeItemAtPath:m4aFile error:NULL]) {
+                  // still throw error if failed
+                  [result sendErrorWithCode:@"IOError"
+                                message:@"Cannot remove m4a file"
+                                details:nil];
+                }
+              } 
+              [result sendSuccessWithData:self->_videoRecordingPath];
+              self->_videoRecordingPath = nil;
+              // ignore error (client must check whether file exist or not)
+              // [result sendErrorWithCode:@"IOError"
+              //                   message:@"AVAssetWriter could not finish writing!"
+              //                   details:nil];
+            }
+          }];
         } else {
           [result sendErrorWithCode:@"IOError"
                             message:@"AVAssetWriter could not finish writing!"
@@ -877,6 +960,14 @@ NSString *const errorMethod = @"error";
   } else {
     [_methodChannel invokeMethod:errorMethod arguments:@"Images from camera are not streaming!"];
   }
+}
+
+- (void)getPositionWithResult:(FLTThreadSafeFlutterResult *)result {
+  double interval = CACurrentMediaTime()-_firstSampleTime;
+  long milliseconds = (long)(interval*1000.0L);
+  //Float64 timestamp = CMTimeGetSeconds(_lastAudioSampleTime) - CMTimeGetSeconds(_firstAudioSampleTime);
+  //long milliseconds = (long)(timestamp*1000.0f);
+  [result sendSuccessWithData:[NSNumber numberWithLong:milliseconds]];
 }
 
 - (void)getMaxZoomLevelWithResult:(FLTThreadSafeFlutterResult *)result {
