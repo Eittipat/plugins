@@ -41,6 +41,7 @@ import io.flutter.embedding.engine.systemchannels.PlatformChannel;
 import io.flutter.plugin.common.EventChannel;
 import io.flutter.plugin.common.MethodChannel;
 import io.flutter.plugin.common.MethodChannel.Result;
+import io.flutter.plugins.camera.ext.MediaExtension;
 import io.flutter.plugins.camera.features.CameraFeature;
 import io.flutter.plugins.camera.features.CameraFeatureFactory;
 import io.flutter.plugins.camera.features.CameraFeatures;
@@ -153,6 +154,8 @@ class Camera
   private CameraCaptureProperties captureProps;
 
   private MethodChannel.Result flutterResult;
+
+  private MediaExtension mediaExtension;
 
   /** A CameraDeviceWrapper implementation that forwards calls to a CameraDevice. */
   private class DefaultCameraDeviceWrapper implements CameraDeviceWrapper {
@@ -732,6 +735,8 @@ class Camera
   }
 
   public void startVideoRecording(@NonNull Result result) {
+    mediaExtension = new MediaExtension();
+
     final File outputDir = applicationContext.getCacheDir();
     try {
       captureFile = File.createTempFile("REC", ".mp4", outputDir);
@@ -753,7 +758,10 @@ class Camera
     recordingVideo = true;
     try {
       createCaptureSession(
-          CameraDevice.TEMPLATE_RECORD, () -> mediaRecorder.start(), mediaRecorder.getSurface());
+          CameraDevice.TEMPLATE_RECORD, () -> {
+            mediaRecorder.start();
+            mediaExtension.addTimestamp();
+          }, mediaRecorder.getSurface());
       result.success(null);
     } catch (CameraAccessException e) {
       recordingVideo = false;
@@ -784,6 +792,7 @@ class Camera
       result.error("videoRecordingFailed", e.getMessage(), null);
       return;
     }
+    mediaExtension.saveExtensionFiles(result, captureFile);
     result.success(captureFile.getAbsolutePath());
     captureFile = null;
   }
