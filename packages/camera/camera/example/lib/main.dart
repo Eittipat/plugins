@@ -9,6 +9,7 @@ import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
+import 'package:sentry_flutter/sentry_flutter.dart';
 import 'package:video_player/video_player.dart';
 
 /// Camera example home widget.
@@ -1070,12 +1071,22 @@ class CameraApp extends StatelessWidget {
 List<CameraDescription> _cameras = <CameraDescription>[];
 
 Future<void> main() async {
-  // Fetch the available cameras before initializing the app.
-  try {
-    WidgetsFlutterBinding.ensureInitialized();
-    _cameras = await availableCameras();
-  } on CameraException catch (e) {
-    _logError(e.code, e.description);
-  }
-  runApp(const CameraApp());
+    runZonedGuarded(() async {
+    await SentryFlutter.init(
+          (options) {
+        options.dsn = 'your_project_dns_goes_here';
+        options.tracesSampleRate = 1.0;
+      },
+    );
+    // Fetch the available cameras before initializing the app.
+    try {
+      WidgetsFlutterBinding.ensureInitialized();
+      _cameras = await availableCameras();
+    } on CameraException catch (e) {
+      _logError(e.code, e.description);
+    }
+    runApp(const CameraApp());
+  }, (exception, stackTrace) async {
+    await Sentry.captureException(exception, stackTrace: stackTrace);
+  });
 }
