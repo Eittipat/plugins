@@ -491,6 +491,7 @@ NSString *const errorMethod = @"error";
     if (_videoWriter.status != AVAssetWriterStatusWriting) {
       [_videoWriter startWriting];
       [_videoWriter startSessionAtSourceTime:currentSampleTime];
+      [_extension addTimestamp];
     }
 
     if (output == _captureVideoOutput) {
@@ -645,7 +646,6 @@ NSString *const errorMethod = @"error";
     _audioTimeOffset = CMTimeMake(0, 1);
     _videoIsDisconnected = NO;
     _audioIsDisconnected = NO;
-    [_extension addTimestamp];
     [result sendSuccess];
   } else {
     [result sendErrorWithCode:@"Error" message:@"Video is already recording" details:nil];
